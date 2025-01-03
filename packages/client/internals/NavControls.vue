@@ -31,6 +31,8 @@ const {
   total,
   enterPresenter,
   exitPresenter,
+  playRunbook,
+  playGlobalRunbook,
 } = useNav()
 const {
   brush,
@@ -168,6 +170,22 @@ if (__SLIDEV_FEATURE_RECORD__)
           </template>
         </MenuButton>
       </template>
+
+      <VerticalDivider />
+
+      <IconButton
+        title="Play Current Page Runbook"
+        @click="playRunbook"
+      >
+        <div class="i-carbon:video-player" />
+      </IconButton>
+
+      <IconButton
+        title="Play Global Runbook"
+        @click="playGlobalRunbook"
+      >
+        <div class="i-carbon:playlist" />
+      </IconButton>
 
       <VerticalDivider v-if="!isEmbedded" />
 

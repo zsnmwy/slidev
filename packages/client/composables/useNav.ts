@@ -2,9 +2,13 @@ import type { ClicksContext, SlideRoute, TocItem } from '@slidev/types'
 import type { ComputedRef, Ref, TransitionGroupProps, WritableComputedRef } from 'vue'
 import type { RouteLocationNormalized, Router } from 'vue-router'
 import { slides } from '#slidev/slides'
-import { clamp } from '@antfu/utils'
+import { clamp, sleep } from '@antfu/utils'
 import { parseRangeString } from '@slidev/parser/utils'
 import { createSharedComposable } from '@vueuse/core'
+import { useIDBKeyval } from '@vueuse/integrations/useIDBKeyval'
+import axios from 'axios'
+import axiosRetry from 'axios-retry'
+import { chunk } from 'lodash'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CLICKS_MAX } from '../constants'
@@ -14,7 +18,10 @@ import { useRouteQuery } from '../logic/route'
 import { getSlide, getSlidePath } from '../logic/slides'
 import { getCurrentTransition } from '../logic/transition'
 import { createClicksContextBase } from './useClicks'
+import { useDynamicSlideInfo } from './useSlideInfo'
 import { useTocTree } from './useTocTree'
+
+axiosRetry(axios, { retries: 3 })
 
 export interface SlidevContextNav {
   slides: Ref<SlideRoute[]>
@@ -65,6 +72,14 @@ export interface SlidevContextNav {
   enterPresenter: () => void
   /** Exit presenter mode */
   exitPresenter: () => void
+
+  /** Play runbook base on presenter notes */
+  playRunbook: () => void
+  /** Play global runbook start from first page */
+  playGlobalRunbook: () => Promise<void>
+
+  /** Scroll slide from start page to end */
+  scrollSlideFromStartPageToEnd: () => Promise<void>
 }
 
 export interface SlidevContextNavState {
@@ -88,6 +103,40 @@ export interface SlidevContextNavState {
 }
 
 export interface SlidevContextNavFull extends SlidevContextNav, SlidevContextNavState { }
+
+export type DoubaoTTS = Array<{
+  result: {
+    reqid: string
+    code: number
+    operation: string
+    message: string
+    sequence: number
+    data: string
+    addition: {
+      duration: string
+      first_pkg: string
+      frontend: string
+    }
+  }
+  voice_type: string
+  speed_ratio: number
+  voice_text: string
+}>
+
+const doubaoTTSStore = useIDBKeyval<DoubaoTTS[]>('doubao-tts-store', [])
+
+async function fetchDoubaoTTSBaseonTexts(texts: string[]) {
+  const url = import.meta.env.VITE_DOUBAO_TTS_API
+  const res = await axios.post<{
+    code: number
+    data: DoubaoTTS[]
+  }>(url, {
+    voice_type: 'zh_male_wennuanahu_moon_bigtts',
+    speed_ratio: 1.0,
+    text: texts,
+  })
+  return res.data.data
+}
 
 export function useNavBase(
   currentSlideRoute: ComputedRef<SlideRoute>,
@@ -215,6 +264,177 @@ export function useNavBase(
     })
   }
 
+  async function speakDoubaoTTS(base64String: string) {
+    const audioPlayer = document.createElement('audio')
+
+    return new Promise<void>((resolve) => {
+      function playBase64MP3(base64String: string) {
+        const audioSrc = `data:audio/mp3;base64,${base64String}`
+        audioPlayer.src = audioSrc
+        audioPlayer.play()
+      }
+      function onAudioEnded() {
+        audioPlayer.removeEventListener('ended', onAudioEnded)
+        resolve()
+      }
+      audioPlayer.addEventListener('ended', onAudioEnded)
+      playBase64MP3(base64String)
+    })
+  }
+
+  async function playRunbook() {
+    const { info } = useDynamicSlideInfo(currentSlideNo)
+
+    const slide = slides.value.find(slide => slide.no === currentSlideNo.value)
+
+    // Get presenter notes
+    const html = info.value?.noteHTML ? info.value?.noteHTML : slide?.meta.slide.noteHTML
+    const dom = new DOMParser().parseFromString(html ?? '', 'text/html')
+    const notes: string[] = []
+    dom.querySelectorAll('p').forEach(note => notes.push(note.textContent
+      ?? '',
+    ))
+
+    if (notes.length === 0)
+      return
+    // debugger
+    // Split notes by line
+    const lines = notes
+    // Filter out empty lines, match words, and exclude lines with only symbols
+    const commandsAndVoiceText = lines.filter(line => line && line.trim() !== '')
+
+    const commandsText = ['[next]', '[prev]', '[go first]', '[go last]', '[next slide]']
+    const voiceTexts = commandsAndVoiceText.filter(text => !commandsText.includes(text) && text.trim() !== '' && !/\[go \d+\]/.test(text) && !/\[delay \d+\]/.test(text))
+
+    // fetch tts from doubao local store
+    const ttsStore = doubaoTTSStore.data.value
+    const notFoundVoiceTexts = voiceTexts.filter(voiceText => !ttsStore.flat().find(tts => tts.voice_text === voiceText))
+
+    if (notFoundVoiceTexts.length > 0) {
+      const tts = await fetchDoubaoTTSBaseonTexts(notFoundVoiceTexts)
+      ttsStore.push(...tts)
+    }
+
+    // Execute commands
+    for await (const command of commandsAndVoiceText) {
+      const action = command
+      // Execute action
+      switch (action) {
+        case '[next]':
+          await next()
+          break
+        case '[prev]':
+          await prev()
+          break
+        case '[go first]':
+          await goFirst()
+          break
+
+        case '[go last]':
+          await goLast()
+          break
+        case '[next slide]':
+          await nextSlide()
+          break
+
+        case /\[go \d+\]/.test(action) ? action : '__unused':
+        {
+          const page = Number.parseInt(action.split(' ')[1])
+          await go(page)
+          break
+        }
+
+        case /\[delay \d+\]/.test(action) ? action : '__unused':
+        {
+          await sleep(Number.parseInt(action.split(' ')[1]) * 1000)
+          break
+        }
+
+        default: {
+          const tts = ttsStore.flat().find(item => item.voice_text === action)
+          tts?.result.data && await speakDoubaoTTS(tts.result.data)
+          break
+        }
+      }
+    }
+  }
+
+  async function scrollSlideFromStartPageToEnd() {
+    await goFirst()
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
+    await sleep(1000 * 10)
+    for await (const slide of slides.value) {
+      if (slide.meta.__clicksContext?.total && slide.meta.__clicksContext?.total > 0) {
+        for await (const _ of Array.from({ length: slide.meta.__clicksContext.total }).keys()) {
+          await next()
+          await sleep(1000 * 3)
+        }
+      }
+      await sleep(1000 * 3)
+      await next()
+    }
+  }
+
+  async function fetchAllTTSOnce() {
+    const notFoundVoiceTextsAll: string[] = []
+    // fetch tts from doubao local store
+    const ttsStore = doubaoTTSStore.data.value
+
+    for await (const slide of slides.value) {
+      const { info } = useDynamicSlideInfo(slide!.no)
+
+      // Get presenter notes
+      const html = info.value?.noteHTML ? info.value?.noteHTML : slide?.meta.slide.noteHTML
+      const dom = new DOMParser().parseFromString(html ?? '', 'text/html')
+      const notes: string[] = []
+      dom.querySelectorAll('p').forEach(note => notes.push(note.textContent
+        ?? '',
+      ))
+
+      if (!notes)
+        return
+      // Split notes by line
+      const lines = notes
+      // Filter out empty lines and match words
+      const commandsAndVoiceText = lines.filter(line => line.trim() !== '')
+
+      const commandsText = ['[next]', '[prev]', '[go first]', '[go last]', '[next slide]']
+      const voiceTexts = commandsAndVoiceText.filter(text => !commandsText.includes(text) && text.trim() !== '' && !/\[go \d+\]/.test(text) && !/\[delay \d+\]/.test(text))
+
+      const notFoundVoiceTexts = voiceTexts.filter(voiceText => !ttsStore.flat().find(tts => tts.voice_text === voiceText))
+      notFoundVoiceTextsAll.push(...notFoundVoiceTexts)
+    }
+
+    if (notFoundVoiceTextsAll.length > 0) {
+      for await (const ttsChunk of chunk(Array.from(new Set(notFoundVoiceTextsAll)), 6)) {
+        const tts = await fetchDoubaoTTSBaseonTexts(ttsChunk)
+        ttsStore.push(...tts)
+      }
+    }
+  }
+
+  async function playGlobalRunbook() {
+    try {
+      await fetchAllTTSOnce()
+      await goFirst()
+      // @ts-expect-error window is not defined
+      window.streamInitialized = true
+      for await (const _slide of slides.value) {
+        await playRunbook()
+        await sleep(500)
+        await nextSlide()
+      }
+      await sleep(5 * 1000)
+    }
+    catch (_error) {
+      console.error('Error in playGlobalRunbook', _error)
+    }
+    finally {
+      // @ts-expect-error window is not defined
+      window.recordingFinished = true
+    }
+  }
+
   return {
     slides,
     total,
@@ -245,6 +465,9 @@ export function useNavBase(
     prevSlide,
     enterPresenter,
     exitPresenter,
+    playRunbook,
+    playGlobalRunbook,
+    scrollSlideFromStartPageToEnd,
   }
 }
 
@@ -398,3 +621,4 @@ export const useNav = createSharedComposable((): SlidevContextNavFull => {
     ...state,
   }
 })
+export { slides }

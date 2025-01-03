@@ -29,6 +29,10 @@ const noteDisplay = ref<HTMLElement | null>(null)
 const CLASS_FADE = 'slidev-note-fade'
 const CLASS_MARKER = 'slidev-note-click-mark'
 
+const transformedNoteHtml = computed(() => {
+  return props.noteHtml?.replace(/\[.*?\]/g, '<span class="next-tag">$&</span>') || ''
+})
+
 function processNote() {
   if (!noteDisplay.value || !withClicks.value)
     return
@@ -150,7 +154,7 @@ watchEffect(() => {
     ref="noteDisplay"
     class="prose overflow-auto outline-none slidev-note"
     :class="[props.class, withClicks ? 'slidev-note-with-clicks' : '']"
-    v-html="noteHtml"
+    v-html="transformedNoteHtml"
   />
   <div
     v-else-if="note"
@@ -171,5 +175,17 @@ watchEffect(() => {
 <style>
 .slidev-note :first-child {
   margin-top: 0;
+}
+
+.next-tag {
+  background-color: rgb(191, 255, 0);
+  font-weight: bold;
+  position: relative;
+}
+
+.next-tag::before {
+  content: '⚙️'; /* Unicode for a pushpin icon */
+  display: inline-block;
+  margin-right: 0.2em;
 }
 </style>

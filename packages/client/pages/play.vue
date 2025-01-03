@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { useStyleTag } from '@vueuse/core'
-import { computed, ref, shallowRef } from 'vue'
+import { useStyleTag, useUrlSearchParams } from '@vueuse/core'
+import { computed, onMounted, ref, shallowRef } from 'vue'
 import { useDrawings } from '../composables/useDrawings'
 import { useNav } from '../composables/useNav'
 import { useSwipeControls } from '../composables/useSwipeControls'
@@ -14,7 +14,7 @@ import { onContextMenu } from '../logic/contextMenu'
 import { registerShortcuts } from '../logic/shortcuts'
 import { editorHeight, editorWidth, isEditorVertical, isScreenVertical, showEditor } from '../state'
 
-const { next, prev, isPrintMode } = useNav()
+const { next, prev, isPrintMode, playGlobalRunbook } = useNav()
 const { isDrawing } = useDrawings()
 
 const root = ref<HTMLDivElement>()
@@ -59,6 +59,17 @@ const persistNav = computed(() => isScreenVertical.value || showEditor.value)
 const SideEditor = shallowRef<any>()
 if (__DEV__ && __SLIDEV_FEATURE_EDITOR__)
   import('../internals/SideEditor.vue').then(v => SideEditor.value = v.default)
+
+const params = useUrlSearchParams<{
+  auto: string
+}>('history')
+
+// Auto clicks the page
+onMounted(async () => {
+  if (params.auto === 'true') {
+    await playGlobalRunbook()
+  }
+})
 </script>
 
 <template>

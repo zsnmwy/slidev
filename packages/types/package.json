@@ -1,6 +1,6 @@
 {
-  "name": "@slidev/types",
-  "version": "0.50.1",
+  "name": "@zsnmwy/types",
+  "version": "0.50.2",
   "description": "Shared types declarations for Slidev",
   "author": "antfu <anthonyfu117@hotmail.com>",
   "license": "MIT",
